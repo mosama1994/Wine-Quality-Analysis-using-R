@@ -1,0 +1,680 @@
+---
+title: "**Analysis of Wine Quality**"
+author: "**Muhammad Osama**"
+output:
+  html_document: 
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(boot)
+library(PerformanceAnalytics)
+library(plotly)
+library(glmnet)
+library(car)
+library(emmeans)
+library(rstatix)
+library(gridExtra)
+library(DT)
+library(GGally)
+library(caret)
+library(splitTools)
+library(pROC)
+library(cvms)
+library(aod)
+
+# A Prefix nulling hook.
+
+# Make sure to keep the default for normal processing.
+default_output_hook <- knitr::knit_hooks$get("output")
+
+# Output hooks handle normal R console output.
+knitr::knit_hooks$set( output = function(x, options) {
+
+  comment <- knitr::opts_current$get("comment")
+  if( is.na(comment) ) comment <- ""
+  can_null <- grepl( paste0( comment, "\\s*\\[\\d?\\]" ),
+                     x, perl = TRUE)
+  do_null <- isTRUE( knitr::opts_current$get("null_prefix") )
+  if( can_null && do_null ) {
+    # By default R print output aligns at the right brace.
+    align_index <- regexpr( "\\]", x )[1] - 1
+    # Two cases: start or newline
+    re <- paste0( "^.{", align_index, "}\\]")
+    rep <- comment
+    x <- gsub( re, rep,  x )
+    re <- paste0( "\\\n.{", align_index, "}\\]")
+    rep <- paste0( "\n", comment )
+    x <- gsub( re, rep,  x )
+  }
+
+  default_output_hook( x, options )
+
+})
+
+knitr::opts_template$set("kill_prefix"=list(comment=NA, null_prefix=TRUE))
+knitr::opts_chunk$set(opts.label="kill_prefix")
+```
+
+```{css, echo=FALSE}
+.main-container {
+    max-width: 100%;
+}
+pre {
+  font-size: 20px;
+  font-weight: bold;
+  font-family: Arial;
+}
+body, td {
+  font-size: 20px;
+  font-family: Arial;
+}
+h1,h2,h3,h4,h5,h6 {
+  font-family: Arial;
+}
+```
+
+## **Data Set Description**
+
+This data set has two types of wines and their various attributes. The quality of wine is the target variable in the data set. There are 12 predictors in the data set. The data set has a total of 6497 rows. There were no null values found in the data set.
+
+```{r data set description}
+df = read.csv("Wine Quality - Red.csv", sep = ";")
+df = cbind(rep(0, nrow(df)),df)
+colnames(df)[1] = "Type"
+df_1 = read.csv("Wine Quality - White.csv", sep = ";")
+df_1 = cbind(rep(1, nrow(df_1)),df_1)
+colnames(df_1)[1] = "Type"
+df_2 = as_tibble(rbind(df,df_1))
+n_0 = nrow(df_2[df_2$Type==0,]) # Number of rows of white wine
+n_1 = nrow(df_2[df_2$Type==1,]) # Number of rows of red wine
+datatable(df_2, filter='top',extensions = c('Buttons', 'Scroller'), options=list(autoWidth=TRUE, scrollX = TRUE, scrollCollapse = TRUE))
+```
+
+### **Summary of Data Set**
+
+``` {r dataset summary}
+summary(df_2)
+```
+
+```{r null values, echo=FALSE, results='hide'}
+sum(is.na(df_2))
+```
+<br>
+
+## **Data Set Distribution**
+
+The following plot shows the distribution of each variable and the correlation between all the variables of the data set including their significance levels:
+
+```{r correlation plot, fig.align='center', fig.width=20, fig.height=13, results='hide'}
+chart.Correlation(df_2, histogram = TRUE, method = "pearson")
+```
+<br>
+
+## **Linear Regression using Bootstrap**
+
+Performed bootstrap sampling on the data set to create the training set. All those tuples not present in the training set were used as the testing set. The results are as follows:
+
+``` {r bootstrap linear}
+bootstrap = function (data_1) {
+  set.seed(555)
+  samples = 1000
+  mse_samples = numeric(samples)
+  for (i in 1:samples) {
+    train_index = sample(1:nrow(data_1),size = nrow(data_1), replace = TRUE)
+    train = data_1[train_index,]
+    test = data_1[-c(train_index),]
+    model = lm(quality ~ ., data = train)
+    predictions = predict(model, test)
+    mse_samples[i] = mean((predictions - test$quality)^2)
+  }
+  return (mse_samples)
+}
+mse_boot = mean(bootstrap(df_2))
+paste("Bootstrap Linear Regression Mean Squared Error:",mse_boot)
+```
+<br>
+
+## **Linear Regression using Holdout Method**
+
+Performed Linear Regression on the data set using the hold out method. The data set was split into training ans test set in the ratio 66% to 34% respectively. Linear Regression model was fit on the training set and used to predict the test set. The results are as follows:
+
+### **Linear Regression Model Summary**
+
+``` {r holdout}
+set.seed(555)
+white_samples_index = sample(1:n_0, ceiling(0.66 * n_0), replace = FALSE)
+red_samples_index = (sample(1:n_1, ceiling(0.66 * n_1), replace = FALSE)) + n_0
+train_1_index = c(white_samples_index,red_samples_index)
+train_1 = df_2[train_1_index,]
+test_1 = df_2[-train_1_index,]
+
+model_1 = lm(quality ~ ., data = train_1)
+summary(model_1)
+```
+
+### **Linear Regression Model Error Rates**
+
+``` {r lr error rates}
+prediction_1 = predict(model_1, test_1)
+mse_1 = mean((prediction_1 - test_1$quality)^2)
+mad_1 = mean(abs(prediction_1 - test_1$quality))
+paste("Holdout Linear Regression Mean Squared Error:",mse_1)
+paste("Holdout Linear Regression Mean Absolute Deviation:",mad_1)
+```
+<br>
+
+## **Linear Model Assumptions**
+
+Checked if the linear model assumptions were met in the hold out model. The results are as follows:
+
+``` {r linear model plot, fig.align='center', fig.width=20, fig.height=13, results='hide'}
+par(mfrow=c(2,2))
+plot(model_1, cex.id = 1.3)
+par(mfrow=c(1,1))
+```
+
+```{r cooks & dffits, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+# Cooks Distance
+par(mfrow=c(1,2))
+plot(cooks.distance(model_1), ylab="Cooks Distance")
+abline(h=0.02)
+cooks_outlier = which(cooks.distance(model_1) > 0.02)
+for (i in cooks_outlier) {
+  text(i, cooks.distance(model_1)[i],i,pos = 3,cex = 1.3)
+}
+
+# DFFITS
+plot(dffits(model_1), ylab="DFFITS")
+abline(h=-0.4)
+abline(h=0.4)
+dffits_outlier = which(dffits(model_1) < -0.4 | dffits(model_1) > 0.4)
+for (i in dffits_outlier) {
+  if (i != 3177) {
+    text(i, dffits(model_1)[i],i,pos = 1,cex=1.3)
+  }
+}
+text(3177, dffits(model_1)[3177],3177,pos = 3,cex=1.3)
+```
+
+Analysis of the Cook's distance & DFFITS plot revealed some potential influential points which were 854, 1854, 1891, 3121, 3177, 4242. I examined the effect of each of these points by removing them and then rerunning the model without them. The results are as follows:
+
+``` {r outliers effect}
+mse_model_base = bootstrap(train_1)
+mse_model_outlier_1 = bootstrap(train_1[-c(854),])
+mse_model_outlier_2 = bootstrap(train_1[-c(1854),])
+mse_model_outlier_3 = bootstrap(train_1[-c(1891),])
+mse_model_outlier_4 = bootstrap(train_1[-c(3121),])
+mse_model_outlier_5 = bootstrap(train_1[-c(3177),])
+mse_model_outlier_6 = bootstrap(train_1[-c(4242),])
+```
+
+### **Outlier Check**
+
+``` {r outlier 854}
+t.test(x=mse_model_base, y=mse_model_outlier_1, alternative = 'two.sided')
+t.test(x=mse_model_base, y=mse_model_outlier_2, alternative = 'two.sided')
+t.test(x=mse_model_base, y=mse_model_outlier_3, alternative = 'two.sided')
+t.test(x=mse_model_base, y=mse_model_outlier_4, alternative = 'two.sided')
+t.test(x=mse_model_base, y=mse_model_outlier_5, alternative = 'two.sided')
+t.test(x=mse_model_base, y=mse_model_outlier_6, alternative = 'two.sided')
+```
+
+Looking at the results from the t tests, we can see that tuples with index 1891 & 4242 are influential outliers at the 95% confidence interval.
+
+<br>
+
+## **Cross Validation**
+
+Performed 10 fold cross validation on the data set with logistic regression. The results for the model are as follows:
+
+``` {r 10 fold cv}
+model_2 = glm(quality ~ ., data = df_2)
+# 10 Fold Cross Validation
+cv_3 = cv.glm(df_2, model_2, K = 10)
+paste("Cross Validation Estimate of Prediction Error:",cv_3$delta[1])
+```
+<br>
+
+## **Backward Feature Selection**
+
+Performed backward feature selection using AIC score on the hold out model. The results for the feature selection are as follows:
+
+### **Backward Selection Results**
+
+``` {r backward selection}
+model_b = step(model_1, direction="backward")
+```
+
+### **Backward Selected Model Error Rates**
+
+``` {r bs error rates}
+prediction_back = predict(model_b, test_1)
+mse_back = mean((prediction_back - test_1$quality)^2)
+mad_back = mean(abs(prediction_back - test_1$quality))
+paste("Linear Regression (Backward Selected Model) Mean Squared Error:",mse_back)
+paste("Linear Regression (Backward Selected Model) Mean Absolute Deviation:",mad_back)
+```
+
+### **Summary of Backward Selected Model**
+
+``` {r bs summary}
+summary(model_b)
+```
+
+### **ANOVA Base Model & Backward Selected Model**
+
+``` {r anova base & bs model}
+anova(model_b,model_1)
+```
+<br>
+
+## **Ridge Regression Model**
+
+Performed ridge regression on the hold out training set. The results are as follows:
+
+``` {r ridge}
+# Training Matrix
+x = model.matrix(train_1$quality ~.-1, data=train_1)
+y = train_1$quality
+# Testing Matrix
+z = model.matrix(test_1$quality ~.-1, data=test_1)
+
+# Ridge Regression
+fit.ridge = glmnet(x,y,alpha=0)
+cv.ridge = cv.glmnet(x, y, alpha = 0)
+prediction_ridge = predict(cv.ridge, z, s="lambda.min")
+mse_ridge = mean((prediction_ridge - test_1$quality)^2)
+mad_ridge = mean(abs(prediction_ridge - test_1$quality))
+```
+
+``` {r ridge plot, fig.align='center', fig.width=20, fig.height=8, results='hide'}
+par(mfrow=c(1,2))
+plot(fit.ridge, xvar = "lambda")
+plot(cv.ridge)
+par(mfrow=c(1,1))
+```
+
+### **Ridge Regression Minimum Lambda & Coefficients**
+
+``` {r ridge results}
+paste("Minimum value of lambda for Ridge Regression:",cv.ridge$lambda.min)
+coef(cv.ridge, s = "lambda.min")
+```
+
+### **Ridge Regression Minimum Lambda & Coefficients**
+
+``` {r ridge error rates}
+paste("Ridge Regression Mean Squared Error:",mse_ridge)
+paste("Ridge Regression Mean Absolute Deviation:",mad_ridge)
+```
+<br>
+
+## **LASSO Regression Model**
+
+Performed LASSO regression on the hold out training set. The results are as follows:
+
+``` {r lasso}
+# Lasso Regression
+fit.lasso = glmnet(x,y,alpha=1)
+cv.lasso = cv.glmnet(x, y, alpha = 1)
+prediction_lasso = predict(cv.lasso, z, s="lambda.min")
+mse_lasso = mean((prediction_lasso - test_1$quality)^2)
+mad_lasso = mean(abs(prediction_lasso - test_1$quality))
+```
+
+``` {r lasso plot, fig.align='center', fig.width=20, fig.height=8, results='hide'}
+par(mfrow=c(1,2))
+plot(fit.lasso, xvar = "lambda")
+plot(cv.lasso)
+par(mfrow=c(1,1))
+```
+
+### **LASSO Regression Minimum Lambda & Coefficients**
+
+``` {r lasso results}
+paste("Minimum value of lambda for LASSO regression:",cv.lasso$lambda.min)
+coef(cv.lasso, s = "lambda.min")
+```
+
+### **LASSO Regression Error Rates**
+
+``` {r lasso error rate}
+paste("LASSO Regression Mean Squared Error:",mse_lasso)
+paste("LASSO Regression Mean Absolute Deviation:",mad_lasso)
+```
+<br>
+
+## **ANOVA**
+
+I am investigating if the differences in percentage volume of alcohol in wine is due to the different types of wine. I used one way ANOVA to perform this analysis. The results are as follows:
+
+### **One Way Anova (Type of Wine)**
+
+``` {r one way anova}
+m = aov(df_2$alcohol ~ as_factor(df_2$Type), data = df_2)
+summary(m)
+```
+
+``` {r one way anova plot, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+df_2 %>%
+  ggplot(aes(x=as_factor(Type),y=alcohol, color=as_factor(Type))) + 
+  stat_summary(fun.data = 'mean_se', geom = 'errorbar', width = 0.2, size = 0.8) +
+  stat_summary(fun.data = 'mean_se', geom = 'pointrange', size=0.5) +
+  labs(x="Type of Wine", y="%Vol Alcohol", color="Type of Wine", title="%Vol of Alcohol VS Wine Type") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+## **ANOVA with continuous co variate**
+
+I am investigating the effect of a co variate which is fixed acidity to check if the differences in percentage volume of alcohol due to the type of wine are still significant. The results are as follows:
+
+### **One Way ANOVA (Type & Fixed Acidity)**
+
+``` {r one way with cov}
+model_ancova = lm(df_2$alcohol ~ as_factor(df_2$Type) + df_2$fixed.acidity)
+Anova(model_ancova, type = 3)
+```
+
+### **Effect of Type of Wine with Fixed Acidity as Co Variate**
+
+``` {r emm one way}
+emm_options(contrasts=c("contr.treatment", "contr.poly"))
+emm_1 = emmeans(model_ancova, specs = pairwise ~ Type)
+emm_1
+```
+
+``` {r emmeans one way plot, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+plot(emm_1) + coord_flip() + labs(y="Type of Wine (0 = White Wine, 1 = Red Wine)",
+                                  x="Estimated Marginal Mean %Vol of Alcohol",
+                                  title="Estimated Marginal Mean for Volume of Alcohol VS Type of Wine") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+<br>
+
+## **Two Way ANOVA (Type of Wine & Residual Sugar)**
+
+I am investigating the affect of levels of residual sugar together with type of wine on percentage volume of alcohol. First, we will check if the interaction between levels of residual sugar and type of wine are significant. The results are as follows:
+
+### **Interaction Check**
+
+``` {r interaction}
+index_sorted = order(df_2$residual.sugar)
+bin = floor(nrow(df_2) / 3)
+df_3 = df_2
+df_3[index_sorted[1:bin], 'residual.sugar'] = 1
+df_3[index_sorted[(bin+1):(2*bin)], 'residual.sugar'] = 2
+df_3[index_sorted[(2*bin+1):length(index_sorted)], 'residual.sugar'] = 3
+
+# Discretizing pH attribute into low(1), high(2)
+bin_2 = floor(nrow(df_2) / 2)
+index_sorted_ph = order(df_2$pH)
+df_3[index_sorted_ph[1:bin_2], 'pH'] = 1
+df_3[index_sorted_ph[(bin_2+1):length(index_sorted_ph)], 'pH'] = 2
+
+# Checking interaction b/w type & residual sugar
+model_2way_1 = lm(df_3$alcohol ~ as_factor(df_3$Type) * as_factor(df_3$residual.sugar))
+anova(model_2way_1)
+```
+
+``` {r interaction plot, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+emmip(model_2way_1, residual.sugar ~ Type, type="response") + theme_bw() + 
+  labs(y = "Estimated Marginal Mean\n(%Vol of Alcohol)",
+       x = "Type of Wine (0 = White Wine, 1 = Red Wine)", color="Residual Sugar\n Level",
+       title="Estimated Marginal Mean VS Type of Wine at each Level of Residual Sugar") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see from the results and the plot that there is an interaction between the type of wine and the levels of residual sugar. Hence, we will now look at the simple effects of the type of wine and the levels of residual sugar on percentage volume of alcohol.
+
+### **Simple Effects of Type of Wine**
+
+``` {r simple effects type}
+emm_model_2way_1 = emmeans(model_2way_1, pairwise ~ Type | residual.sugar, by='residual.sugar')
+emm_model_2way_type = emmeans(model_2way_1, pairwise ~ residual.sugar | Type, by='Type')
+emm_model_2way_1
+```
+
+### **Simple Effects of Residual Sugar**
+
+```{r simple effects residual sugar}
+emm_model_2way_type
+```
+
+``` {r emm plot, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+plot(emm_model_2way_1) + coord_flip() + labs(y="Type of Wine (0 = White Wine, 1 = Red Wine)",
+                                             x="Estimated Marginal Mean\n(%Vol of Alcohol)",
+                                             title="Estimated Marginal Mean VS Type of Wine at each Level of Residual Sugar")+
+  theme(plot.title = element_text(hjust = 0.5))
+plot(emm_model_2way_type) + coord_flip() + labs(y="Residual Sugar Level (1 = Low, 2 = Medium,  3 = High)",
+                                                x="Estimated Marginal Mean\n(%Vol of Alcohol)",
+                                                title="Estimated Marginal Mean VS Levels of Residual Sugar at each Type of Wine")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see from the results that the differences in percentage volume of alcohol due to type of wine is significant across each of the groups of residual sugar at the 95% confidence interval. We can also see that the differences in percentage volume of alcohol due to red wine is significant across each group of residual sugar whereas the differences in percentage volume of alcohol due to white wine is only significant between groups 1 and 2 of residual sugar.
+<br>
+
+## **Two Way ANOVA (Type of Wine & pH)**
+
+I am investigating the affect of levels of pH together with type of wine on percentage volume of alcohol. First, we will check if the interaction between levels of pH and type of wine are significant. The results are as follows:
+
+### **Interaction Check**
+
+``` {r type ph interaction}
+model_2way_2 = lm(df_3$alcohol ~ df_3$Type + df_3$pH + (df_3$Type * df_3$pH))
+summary(model_2way_2)
+model_2way_3 = lm(df_3$alcohol ~ as_factor(df_3$Type) + as_factor(df_3$pH))
+```
+
+``` {r type ph interaction plot, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+emmip(model_2way_3, pH ~ Type, type = "response") + theme_bw() + 
+  labs(y = "Estimated Marginal Mean\n(%Vol of Alcohol)",
+       x = "Type of Wine (0 = White Wine, 1 = Red Wine)", color="pH Level",
+       title="Estimated Marginal Mean VS Type of Wine at each Level of pH") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see from the results and the plot that there is no interaction between the type of wine and the levels of pH. Hence, we will now look at the main effects of the type of wine and the levels of pH on the percentage volume of alcohol.
+
+### **Two Way ANOVA (Type of Wine & pH) without interaction**
+
+``` {r 2 way anova}
+Anova(model_2way_3, type = 3)
+emm_model_2way_3_pH = emmeans(model_2way_3,specs = pairwise ~ pH)
+emm_model_2way_3_Type = emmeans(model_2way_3,specs = pairwise ~ Type)
+```
+
+### **Main Effect of pH**
+
+``` {r emm ph}
+emm_model_2way_3_pH
+```
+
+### **Main Effect of Type of Wine**
+
+``` {r emm type}
+emm_model_2way_3_Type
+```
+
+``` {r emm plot type ph, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+plot(emm_model_2way_3_pH) + coord_flip() + labs(y="pH Level(1 = Low, 2 = High)",
+                                             x="Estimated Marginal Mean\n(%Vol of Alcohol)",
+                                             title="Estimated Marginal Mean (%Vol of Alcohol) VS pH Level")+theme(plot.title = element_text(hjust = 0.5))
+plot(emm_model_2way_3_Type) + coord_flip() + labs(y="Type of Wine (0 = White Wine, 1 = Red Wine)",
+                                             x="Estimated Marginal Mean\n(%Vol of Alcohol)",
+                                             title="Estimated Marginal Mean (%Vol of Alcohol) VS Type of Wine")+theme(plot.title = element_text(hjust = 0.5))
+```
+
+We can see from the ANOVA test and the plots that both the type of wine and level of pH are together significant in determining the change in the percentage volume of alcohol. The plots show that there is a significant difference in the percentage volume of alcohol in each type of wine when averaged over all the levels of pH. The plots also show that there is a significant difference in the percentage volume of alcohol at each pH level when averaged over all the types of wine.
+<br>
+
+## **Polynomial Regression**
+
+I am looking at different polynomial regression models and investigating which one is the best for modelling the data. The results are as follows:
+
+``` {r polynomial regression, fig.align='center', fig.width=20, fig.height=10, results='hide'}
+vars = names(df_2)[1:12]
+formula = "quality~"
+formulas = rep(formula, times=12)
+
+for (j in 1:12) {
+  a = 1
+  for (i in vars) {
+    if (a <= j) {
+      formulas[j] = paste(formulas[j],'I(',i,"^",a,')','+',sep='')
+    }
+    else {
+      formulas[j] = paste(formulas[j],'I(',i,"^",1,')','+',sep='')
+    }
+    a=a+1
+  }
+  formulas[j] = substr(formulas[j],1,str_length(formulas[j])-1)
+}
+
+parts = partition(y=df_2$Type, p=c(train=0.6,test=0.2,valid=0.2), type='stratified', seed = 555)
+train_test = df_2[c(parts$train,parts$test),]
+valid = df_2[parts$valid,]
+folds = create_folds(y=train_test$Type, k=10, type='stratified', seed = 555)
+
+mse_valid_poly1 = numeric(10)
+mad_valid_poly1 = numeric(10)
+mse_polys = numeric(12)
+mad_polys = numeric(12)
+
+for (t in 1:12) {
+  mse_k10 = numeric(10)
+  mad_k10 = numeric(10)
+  p = 1
+  for (r in folds) {
+    model_poly = glm(as.formula(formulas[t]), data=train_test[r,])
+    predictions_poly = predict(model_poly, train_test[-r,])
+    mse_k10[p] = mean((predictions_poly - train_test[-r,]$quality)^2)
+    mad_k10[p] = mean(abs(predictions_poly - train_test[-r,]$quality))
+    if (t==1) {
+      predict_valid = predict(model_poly, valid)
+      mse_valid_poly1[p] = mean((predict_valid - valid$quality)^2)
+      mad_valid_poly1[p] = mean(abs(predict_valid - valid$quality))
+    }
+    p = p + 1
+  }
+  mse_polys[t] = mean(mse_k10)
+  mad_polys[t] = mean(mad_k10)
+}
+
+poly_data = bind_cols(polynomial=rep(1:12,times=2), vals=c(mse_polys, mad_polys), 
+                      label=c(rep('MSE',times=12),rep('MAD',times=12)))
+ggplot(poly_data, aes(x=polynomial, y=vals, color=label)) + geom_line(size=1) + 
+  labs(title='Error Rates VS Polynomial Degree', x="Polynomial Degree", y="Error Rate", 
+       color='Type of Error') +  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = seq(0, 13, by = 1)) + 
+  geom_text(aes(label=ifelse(vals==min(poly_data[poly_data['label']=='MAD','vals']),
+                             as.character(polynomial),'')),hjust=0.2,vjust=-0.5,size=5) +
+  geom_text(aes(label=ifelse(vals==min(poly_data[poly_data['label']=='MSE','vals']),
+                             as.character(polynomial),'')),hjust=0.2,vjust=1.2,size=5)
+```
+
+### **Degree 1 Linear Model Error Rate on Validation Data Set**
+
+We can see from the above plots based on the error rates that the model of polynomial regression of degree 1 is the best model as it has the lowest error rate. Now we will check the error rate of the polynomial degree 1 model on the validation data set. The results are as follows:
+
+``` {r valid error}
+mse_poly_degree_1 = mean(mse_valid_poly1)
+mad_poly_degree_1 = mean(mad_valid_poly1)
+paste("Logistic Regression Mean Squared Error:",mse_poly_degree_1)
+paste("Logistic Regression Mean Absolute Deviation:",mad_poly_degree_1)
+```
+<br>
+
+## **Logistic Regression**
+
+I performed logistic regression on the data set by converting the target variable to a nominal attribute having values 0 and 1. 0 corresponds to quality less than or equal to 5 and 1 corresponds to quality greater than 5. The results are as follows:
+
+### **Summary of Logistic Regression Model**
+
+``` {r logreg}
+df_4 = df_2
+df_4[df_4[,'quality'] <= 5, 'quality'] = 0
+df_4[df_4[,'quality'] > 5, 'quality'] = 1
+
+qual_0 = df_4[df_4$quality == 0,]
+qual_1 = df_4[df_4$quality == 1,]
+
+traintest_qual0 = partition(y=qual_0$Type, p=c(train=0.66, test=0.34), type='stratified')
+traintest_qual1 = partition(y=qual_1$Type, p=c(train=0.66, test=0.34), type='stratified')
+
+logistic_train = df_4[c(traintest_qual0$train, traintest_qual1$train),]
+logistic_test = df_4[c(traintest_qual0$test, traintest_qual1$test),]
+
+model_logistic = glm(quality~.,data = logistic_train, family = 'binomial')
+summary(model_logistic)
+
+probs = predict(model_logistic, logistic_test, type = 'response')
+prediction_logistic = ifelse(probs>0.5,1,0)
+```
+
+### **Logistic Regression Model Accuracy**
+
+``` {r log res accuracy}
+paste("Logistic Regression Accuracy:", mean(logistic_test$quality == prediction_logistic))
+```
+
+### **Checking significance of model**
+
+Null Hypothesis: All coefficients are equal to zero.  
+Alternate Hypothesis: At least one of the coefficients is not zero.
+
+``` {r wald}
+wald.test(b=coef(model_logistic),Sigma=vcov(model_logistic),Terms=2:13)
+```
+
+From the results of the Wald chi-squared test, we can see that the chi-squared value is very high and the p-value is very small (< 0.05) which means that we reject the null hypothesis and conclude that logistic model is significant.
+
+``` {r roc plot, fig.align='center', fig.width=20, fig.height=10, results='hide', warning=FALSE, message=FALSE}
+target_predicted = tibble("target" = logistic_test$quality,
+                          "prediction" = prediction_logistic)
+
+eval = evaluate(target_predicted,
+                target_col = "target",
+                prediction_cols = "prediction",
+                type = "binomial")
+
+conf_mat = eval$`Confusion Matrix`[[1]]
+
+plot_confusion_matrix(conf_mat,add_normalized = FALSE,
+                      add_col_percentages = FALSE,
+                      add_row_percentages = FALSE,font_counts = font(size = 10)) +
+  theme(text = element_text(size = 25))
+
+par(pty="s")
+roc_auc = roc(logistic_test$quality~probs, plot=TRUE, legacy.axes=TRUE, col='blue', lwd=4,
+    main="ROC Curve", ylab="Sensitivity (True Positive Rate)", xlab="1 - Specificity (False Positive Rate)")
+par(pty="m")
+```
+
+### **ROC area under curve**
+
+``` {r auc}
+roc_auc$auc
+```
+
+The area under curve for the model is very good and is greater than 0.5.
+<br>
+
+## **Proportion Test for Good Quality Wine**
+
+I am investigating if the the proportion of good quality wine is the same for red and white wine types.  
+  
+Null Hypothesis: The proportions are equal.  
+Alternate Hypothesis: The proportions are not equal.
+
+``` {r prop}
+prop.test(c(855,3258),c(1599,4898),conf.level=0.95,correct=FALSE)
+```
+
+From the results, we can see that the p-value is very small (< 0.05) which means that we reject the null hypothesis and conclude that the proportion of good quality wine is different for both the wine types. 
+
+
+
+
